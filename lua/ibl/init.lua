@@ -44,6 +44,14 @@ local setup = function(config)
     M.refresh_all()
 end
 
+local ok, ts = pcall(require, "vim.treesitter")
+local parser_available = false
+if ok then
+    local parsers = require("nvim-treesitter.parsers")
+    local parser = parsers.get_parser(bufnr)
+    parser_available = parser ~= nil
+end
+
 --- Initializes and configures indent-blankline.
 ---
 --- Optionally, the first parameter can be a configuration table.
@@ -154,6 +162,21 @@ M.refresh = function(bufnr)
     local is_current_buffer = vim.api.nvim_get_current_buf() == bufnr
     local config = conf.get_config(bufnr)
 
+    local function is_comment_line(line, row)
+        if not parser_available then
+            return false
+        end
+        local col  = line:find("%S")                      -- nil when the line is blank
+        if not col  then return false end                 -- blank lines are *not* comments
+        col = col - 1                                     -- Lua-string → 0-based column
+        local node = vim.treesitter.get_node { bufnr = bufnr, pos = { row - 1, col } }
+        if not node then return false end                 -- unparsed area
+          if node:type() == "comment" then
+            return true
+          end
+        return false
+    end
+
     if not config.enabled or not vim.api.nvim_buf_is_loaded(bufnr) or not utils.is_buffer_active(bufnr, config) then
         clear_buffer(bufnr)
         return
@@ -216,6 +239,7 @@ M.refresh = function(bufnr)
     local has_empty_foldtext = utils.has_empty_foldtext(bufnr)
 
     local indent_state
+    local indent_state_clone
     local next_whitespace_tbl = {}
     local empty_line_counter = 0
 
@@ -317,6 +341,7 @@ M.refresh = function(bufnr)
             goto continue
         end
 
+        local is_comment = is_comment_line(line, row)
         local whitespace = utils.get_whitespace(line)
         local foldclosed = utils.get_foldclosed(bufnr, row)
         if is_current_buffer and foldclosed == row and not has_empty_foldtext then
@@ -338,8 +363,11 @@ M.refresh = function(bufnr)
         local blankline = (line:len() == 0) or (line == whitespace)
         local whitespace_only = (line == whitespace)
         -- #### calculate indent ####
-        if not blankline then
+        if not (blankline or is_comment) then
             whitespace_tbl, indent_state = indent.get(whitespace, indent_opts, whitespace_only, indent_state)
+        elseif is_comment then
+            indent_state_clone = vim.deepcopy(indent_state)
+            whitespace_tbl, indent_state_clone = indent.get(whitespace, indent_opts, whitespace_only, indent_state_clone)
         elseif empty_line_counter > 0 then
             empty_line_counter = empty_line_counter - 1
             whitespace_tbl = next_whitespace_tbl
@@ -348,7 +376,7 @@ M.refresh = function(bufnr)
                 whitespace_tbl = {}
             else
                 local j = i + 1
-                while j < #lines and (lines[j]:len() == 0 or line_skipped[j] or utils.get_whitespace(lines[j]) == lines[j]) do
+                while j < #lines and (lines[j]:len() == 0 or line_skipped[j] or utils.get_whitespace(lines[j]) == lines[j] or is_comment_line(lines[j], j)) do
                     if not line_skipped[j] then
                         empty_line_counter = empty_line_counter + 1
                     end
